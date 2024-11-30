@@ -5,6 +5,8 @@ from lightrag.components.model_client import OllamaClient
 import logging
 from typing import Dict, Any
 
+from config import Config
+
 
 class OllamaQA(Component):
     def __init__(self, config: Config):

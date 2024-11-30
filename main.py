@@ -1,3 +1,6 @@
+from app import ChatUI
+
+
 def main():
     chat_ui = ChatUI()
     chat_ui.render()

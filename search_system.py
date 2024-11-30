@@ -5,6 +5,10 @@ import chromadb
 from chromadb.config import Settings
 import json
 import os
+from typing import Dict, Any
+
+from config import Config
+from qa import OllamaQA
 
 
 class SearchSystem:

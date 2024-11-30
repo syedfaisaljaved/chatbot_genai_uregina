@@ -1,6 +1,5 @@
 # config.py
 from dataclasses import dataclass
-import os
 
 
 @dataclass

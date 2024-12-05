@@ -10,6 +10,10 @@ import os
 import logging
 from typing import Dict, Any, List
 import torch
+from multiprocessing import Pool, cpu_count
+from tqdm import tqdm
+from functools import partial
+
 
 class SearchSystem:
     def __init__(self, config: Config):
@@ -41,11 +45,35 @@ class SearchSystem:
             self.qdrant.create_collection(
                 collection_name=self.collection_name,
                 vectors_config=VectorParams(
-                    size=384,  # Dimension for all-MiniLM-L6-v2
+                    size=384,
                     distance=Distance.COSINE
                 )
             )
             self._load_initial_data()
+
+    def process_batch(self, batch_data):
+        text_splitter = RecursiveCharacterTextSplitter(
+            chunk_size=250,
+            chunk_overlap=25,
+            separators=["\n\n", "\n", ".", "!", "?", ",", " ", ""]
+        )
+
+        points = []
+        for i, doc in enumerate(batch_data):
+            chunks = text_splitter.split_text(doc['text'])
+            chunk_embeddings = self.embeddings.embed_documents(chunks)
+
+            for j, (chunk, embedding) in enumerate(zip(chunks, chunk_embeddings)):
+                points.append(models.PointStruct(
+                    id=f"doc_{i}_{j}",
+                    vector=embedding,
+                    payload={
+                        "text": chunk,
+                        "url": doc['url'],
+                        "title": doc['title']
+                    }
+                ))
+        return points
 
     def _load_initial_data(self):
         try:
@@ -57,56 +85,40 @@ class SearchSystem:
                 scraped_data = json.load(f)
             print(f"Successfully loaded JSON with {len(scraped_data)} documents")
 
-            text_splitter = RecursiveCharacterTextSplitter(
-                chunk_size=250,
-                chunk_overlap=25,
-                separators=["\n\n", "\n", ".", "!", "?", ",", " ", ""]
-            )
+            # Calculate optimal batch size and number of processes
+            num_processes = cpu_count() - 1  # Leave one CPU free
+            batch_size = max(1, len(scraped_data) // (num_processes * 4))  # Divide data into smaller batches
 
-            print("Processing documents in smaller batches...")
-            processed = 0
-            doc_batch_size = 500
+            # Create batches
+            batches = [
+                scraped_data[i:i + batch_size]
+                for i in range(0, len(scraped_data), batch_size)
+            ]
 
-            for start_idx in range(0, len(scraped_data), doc_batch_size):
-                points = []
-                end_idx = min(start_idx + doc_batch_size, len(scraped_data))
-                current_batch = scraped_data[start_idx:end_idx]
+            print(f"Processing documents using {num_processes} processes...")
 
-                for i, doc in enumerate(current_batch):
-                    processed += 1
-                    if processed % 100 == 0:
-                        print(f"Processing document {processed}/{len(scraped_data)} ({(processed/len(scraped_data)*100):.1f}%)")
+            # Process batches in parallel
+            with Pool(processes=num_processes) as pool:
+                # Use tqdm for progress bar
+                results = list(tqdm(
+                    pool.imap(self.process_batch, batches),
+                    total=len(batches),
+                    desc="Processing batches"
+                ))
 
-                    chunks = text_splitter.split_text(doc['text'])
-                    chunk_embeddings = self.embeddings.embed_documents(chunks)
+            # Flatten results and upload to Qdrant
+            all_points = [point for batch_points in results for point in batch_points]
 
-                    for j, (chunk, embedding) in enumerate(zip(chunks, chunk_embeddings)):
-                        points.append(models.PointStruct(
-                            id=f"doc_{start_idx+i}_{j}",
-                            vector=embedding,
-                            payload={
-                                "text": chunk,
-                                "url": doc['url'],
-                                "title": doc['title']
-                            }
-                        ))
-
-                    # Add to Qdrant in sub-batches
-                    if len(points) >= 100:
-                        print(f"\nAdding batch of {len(points)} points to Qdrant...")
-                        self.qdrant.upsert(
-                            collection_name=self.collection_name,
-                            points=points
-                        )
-                        points = []
-
-                # Add remaining points
-                if points:
-                    print(f"\nAdding final batch of {len(points)} points to Qdrant...")
-                    self.qdrant.upsert(
-                        collection_name=self.collection_name,
-                        points=points
-                    )
+            # Upload to Qdrant in batches
+            upload_batch_size = 100
+            for i in range(0, len(all_points), upload_batch_size):
+                batch = all_points[i:i + upload_batch_size]
+                print(
+                    f"Uploading batch {i // upload_batch_size + 1}/{(len(all_points) + upload_batch_size - 1) // upload_batch_size}")
+                self.qdrant.upsert(
+                    collection_name=self.collection_name,
+                    points=batch
+                )
 
             final_count = self.qdrant.get_collection(self.collection_name).points_count
             print(f"\nFinished loading data. Collection now has {final_count} documents")

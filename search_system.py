@@ -21,63 +21,54 @@ class SearchSystem:
             model_kwargs={'device': 'cpu'}
         )
 
-        # Configure ChromaDB
         self.chroma_client = chromadb.PersistentClient(
-            path="./chroma_db",
-            settings=Settings(
-                allow_reset=True,
-                anonymized_telemetry=False
-            )
+            path="./chroma_db"
         )
 
-        # Initialize collection
-        self._initialize_collection()
-
-    def _initialize_collection(self):
-        """Initialize or create the collection if it doesn't exist"""
         try:
             self.collection = self.chroma_client.get_collection(name="uregina_docs")
-        except Exception as e:
-            logging.info(f"Creating new collection: {str(e)}")
+        except:
             self.collection = self.chroma_client.create_collection(name="uregina_docs")
             self._load_initial_data()
 
     def _load_initial_data(self):
-        """Load initial data into the collection"""
-        try:
-            with open(os.path.join(self.config.cache_dir, 'scraped_data.json')) as f:
-                scraped_data = json.load(f)
+        # ... existing code ...
+        pass
 
-            text_splitter = RecursiveCharacterTextSplitter(
-                chunk_size=500,
-                chunk_overlap=50,
-                separators=["\n\n", "\n", ".", "!", "?", ",", " ", ""]
+    def search(self, query: str, k: int = 3) -> Dict[str, Any]:
+        """
+        Search for relevant documents and get response
+        """
+        try:
+            # Query the collection
+            results = self.collection.query(
+                query_texts=[query],
+                n_results=k
             )
 
-            documents = []
-            metadatas = []
-            ids = []
+            # Format relevant documents
+            relevant_docs = [{
+                'text': doc,
+                'url': meta['url'],
+                'title': meta['title']
+            } for doc, meta in zip(results['documents'][0], results['metadatas'][0])]
 
-            for i, doc in enumerate(scraped_data):
-                chunks = text_splitter.split_text(doc['text'])
-                documents.extend(chunks)
-                metadatas.extend([{
-                    "url": doc['url'],
-                    "title": doc['title']
-                }] * len(chunks))
-                ids.extend([f"doc_{i}_{j}" for j in range(len(chunks))])
+            # Create context from relevant documents
+            context = "\n\n".join([doc['text'] for doc in relevant_docs])
 
-            # Add documents in batches
-            batch_size = 100
-            for i in range(0, len(documents), batch_size):
-                end_idx = min(i + batch_size, len(documents))
-                self.collection.add(
-                    documents=documents[i:end_idx],
-                    metadatas=metadatas[i:end_idx],
-                    ids=ids[i:end_idx]
-                )
-                logging.info(f"Added batch {i // batch_size + 1}")
+            # Get response from QA system
+            response = self.qa.get_response(context, query)
+
+            return {
+                'answer': response['answer'],
+                'sources': [{'url': doc['url'], 'title': doc['title']} for doc in relevant_docs],
+                'success': response['success']
+            }
 
         except Exception as e:
-            logging.error(f"Error loading initial data: {str(e)}")
-            raise
+            logging.error(f"Search error: {str(e)}")
+            return {
+                'answer': "I encountered an error while searching. Please try again.",
+                'sources': [],
+                'success': False
+            }

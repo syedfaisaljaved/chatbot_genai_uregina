@@ -2,14 +2,14 @@ from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from qa import OllamaQA
 from config import Config
-import chromadb
-from chromadb.config import Settings
+from qdrant_client import QdrantClient
+from qdrant_client.http import models
+from qdrant_client.http.models import Distance, VectorParams
 import json
 import os
 import logging
 from typing import Dict, Any, List
 import torch
-
 
 class SearchSystem:
     def __init__(self, config: Config):
@@ -23,15 +23,14 @@ class SearchSystem:
             model_kwargs={'device': 'cpu'}
         )
 
-        print("Setting up ChromaDB...")
-        self.chroma_client = chromadb.PersistentClient(
-            path="./chroma_db"
-        )
+        print("Setting up Qdrant...")
+        self.qdrant = QdrantClient(path="./qdrant_db")
+        self.collection_name = "uregina_docs"
 
         try:
             print("Attempting to get collection 'uregina_docs'...")
-            self.collection = self.chroma_client.get_collection(name="uregina_docs")
-            count = self.collection.count()
+            collection_info = self.qdrant.get_collection(self.collection_name)
+            count = collection_info.points_count
             print(f"Found existing collection with {count} documents")
             if count == 0:
                 print("Collection empty, loading initial data...")
@@ -39,7 +38,13 @@ class SearchSystem:
         except Exception as e:
             print(f"Collection not found: {str(e)}")
             print("Creating new collection...")
-            self.collection = self.chroma_client.create_collection(name="uregina_docs")
+            self.qdrant.create_collection(
+                collection_name=self.collection_name,
+                vectors_config=VectorParams(
+                    size=384,  # Dimension for all-MiniLM-L6-v2
+                    distance=Distance.COSINE
+                )
+            )
             self._load_initial_data()
 
     def _load_initial_data(self):
@@ -52,62 +57,58 @@ class SearchSystem:
                 scraped_data = json.load(f)
             print(f"Successfully loaded JSON with {len(scraped_data)} documents")
 
-            # Reduce chunk size and batch size for better memory management
             text_splitter = RecursiveCharacterTextSplitter(
-                chunk_size=250,  # Reduced from 500
-                chunk_overlap=25,  # Reduced from 50
+                chunk_size=250,
+                chunk_overlap=25,
                 separators=["\n\n", "\n", ".", "!", "?", ",", " ", ""]
             )
 
             print("Processing documents in smaller batches...")
-            documents = []
-            metadatas = []
-            ids = []
             processed = 0
+            doc_batch_size = 500
 
-            # Process in smaller document batches
-            doc_batch_size = 500  # Process 500 documents at a time
             for start_idx in range(0, len(scraped_data), doc_batch_size):
+                points = []
                 end_idx = min(start_idx + doc_batch_size, len(scraped_data))
                 current_batch = scraped_data[start_idx:end_idx]
 
                 for i, doc in enumerate(current_batch):
                     processed += 1
                     if processed % 100 == 0:
-                        print(
-                            f"Processing document {processed}/{len(scraped_data)} ({(processed / len(scraped_data) * 100):.1f}%)")
+                        print(f"Processing document {processed}/{len(scraped_data)} ({(processed/len(scraped_data)*100):.1f}%)")
 
                     chunks = text_splitter.split_text(doc['text'])
-                    documents.extend(chunks)
-                    metadatas.extend([{
-                        "url": doc['url'],
-                        "title": doc['title']
-                    }] * len(chunks))
-                    ids.extend([f"doc_{start_idx + i}_{j}" for j in range(len(chunks))])
+                    chunk_embeddings = self.embeddings.embed_documents(chunks)
 
-                # Add to ChromaDB when batch is full
-                if len(documents) >= 1000 or end_idx == len(scraped_data):
-                    print(f"\nAdding {len(documents)} chunks to ChromaDB...")
+                    for j, (chunk, embedding) in enumerate(zip(chunks, chunk_embeddings)):
+                        points.append(models.PointStruct(
+                            id=f"doc_{start_idx+i}_{j}",
+                            vector=embedding,
+                            payload={
+                                "text": chunk,
+                                "url": doc['url'],
+                                "title": doc['title']
+                            }
+                        ))
 
-                    # Add in smaller sub-batches
-                    sub_batch_size = 100
-                    for i in range(0, len(documents), sub_batch_size):
-                        end = min(i + sub_batch_size, len(documents))
-                        print(
-                            f"Adding sub-batch {i // sub_batch_size + 1}/{(len(documents) + sub_batch_size - 1) // sub_batch_size}")
-
-                        self.collection.add(
-                            documents=documents[i:end],
-                            metadatas=metadatas[i:end],
-                            ids=ids[i:end]
+                    # Add to Qdrant in sub-batches
+                    if len(points) >= 100:
+                        print(f"\nAdding batch of {len(points)} points to Qdrant...")
+                        self.qdrant.upsert(
+                            collection_name=self.collection_name,
+                            points=points
                         )
+                        points = []
 
-                    # Clear processed chunks
-                    documents = []
-                    metadatas = []
-                    ids = []
+                # Add remaining points
+                if points:
+                    print(f"\nAdding final batch of {len(points)} points to Qdrant...")
+                    self.qdrant.upsert(
+                        collection_name=self.collection_name,
+                        points=points
+                    )
 
-            final_count = self.collection.count()
+            final_count = self.qdrant.get_collection(self.collection_name).points_count
             print(f"\nFinished loading data. Collection now has {final_count} documents")
 
         except Exception as e:
@@ -117,15 +118,17 @@ class SearchSystem:
     def search(self, query: str, k: int = 3) -> Dict[str, Any]:
         try:
             print(f"\nSearching for query: {query}")
-            collection_count = self.collection.count()
+            collection_count = self.qdrant.get_collection(self.collection_name).points_count
             print(f"Collection size: {collection_count} documents")
 
-            results = self.collection.query(
-                query_texts=[query],
-                n_results=k
+            query_embedding = self.embeddings.embed_query(query)
+            results = self.qdrant.search(
+                collection_name=self.collection_name,
+                query_vector=query_embedding,
+                limit=k
             )
 
-            found_docs = len(results['documents'][0])
+            found_docs = len(results)
             print(f"Found {found_docs} relevant documents")
 
             if found_docs == 0:
@@ -136,10 +139,10 @@ class SearchSystem:
                 }
 
             relevant_docs = [{
-                'text': doc,
-                'url': meta['url'],
-                'title': meta['title']
-            } for doc, meta in zip(results['documents'][0], results['metadatas'][0])]
+                'text': hit.payload['text'],
+                'url': hit.payload['url'],
+                'title': hit.payload['title']
+            } for hit in results]
 
             context = "\n\n".join([doc['text'] for doc in relevant_docs])
             print(f"Context length: {len(context)} characters")

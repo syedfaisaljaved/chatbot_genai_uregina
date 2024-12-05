@@ -4,8 +4,8 @@ from dataclasses import dataclass
 
 @dataclass
 class Config:
-    max_urls: int = 50
     model_name: str = "llama3.1:8b"
     cache_dir: str = "./data/"
     chunk_size: int = 500
     chunk_overlap: int = 50
+    data_file: str = "web_content.json"

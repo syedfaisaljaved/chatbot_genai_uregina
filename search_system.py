@@ -1,14 +1,13 @@
-# search_system.py
 from langchain.embeddings import HuggingFaceEmbeddings
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 import chromadb
 from chromadb.config import Settings
 import json
 import os
-from typing import Dict, Any
 
 from config import Config
 from qa import OllamaQA
+from typing import Dict, Any
 
 
 class SearchSystem:
@@ -20,17 +19,29 @@ class SearchSystem:
             model_kwargs={'device': 'cpu'}
         )
 
-        self.chroma_client = chromadb.Client(Settings(
-            chroma_db_impl="duckdb+parquet",
-            persist_directory="./chroma_db"
-        ))
-        self.collection = self.chroma_client.create_collection(
-            name="uregina_docs",
-            embedding_function=self.embeddings
+        # Updated ChromaDB client configuration
+        self.chroma_client = chromadb.PersistentClient(
+            path="./chroma_db",
+            settings=Settings(
+                allow_reset=True,
+                anonymized_telemetry=False
+            )
         )
 
+        # Create or get existing collection
+        try:
+            self.collection = self.chroma_client.get_collection(
+                name="uregina_docs",
+                embedding_function=self.embeddings
+            )
+        except ValueError:
+            self.collection = self.chroma_client.create_collection(
+                name="uregina_docs",
+                embedding_function=self.embeddings
+            )
+
     def initialize(self):
-        with open(os.path.join(self.config.cache_dir, 'web_content.json')) as f:
+        with open(os.path.join(self.config.cache_dir, 'scraped_data.json')) as f:
             scraped_data = json.load(f)
 
         text_splitter = RecursiveCharacterTextSplitter(
@@ -52,12 +63,15 @@ class SearchSystem:
             }] * len(chunks))
             ids.extend([f"doc_{i}_{j}" for j in range(len(chunks))])
 
-        self.collection.add(
-            documents=documents,
-            metadatas=metadatas,
-            ids=ids
-        )
-        self.chroma_client.persist()
+        # Add documents in batches to prevent memory issues
+        batch_size = 100
+        for i in range(0, len(documents), batch_size):
+            end_idx = min(i + batch_size, len(documents))
+            self.collection.add(
+                documents=documents[i:end_idx],
+                metadatas=metadatas[i:end_idx],
+                ids=ids[i:end_idx]
+            )
 
     def search(self, query: str, k: int = 3) -> Dict[str, Any]:
         results = self.collection.query(

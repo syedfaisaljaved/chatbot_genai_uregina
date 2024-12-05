@@ -32,8 +32,11 @@ class SearchSystem:
 
         print("Initializing embeddings model...")
         self.embeddings = HuggingFaceEmbeddings(
-            model_name="all-MiniLM-L6-v2",
-            model_kwargs={'device': 'cpu'}
+            model_name="BAAI/bge-large-en-v1.5",  # Best performing free model
+            model_kwargs={
+                'device': 'cuda',  # Use GPU
+                'trust_remote_code': True
+            }
         )
 
         print("Setting up Qdrant...")
@@ -71,14 +74,19 @@ class SearchSystem:
 
             points = []
             total_points = 0
+            total_batches_uploaded = 0
 
             for idx, doc in enumerate(scraped_data):
+                print(
+                    f"\rProcessing document {idx + 1}/{len(scraped_data)} ({((idx + 1) / len(scraped_data)) * 100:.1f}%)",
+                    end="", flush=True)
+
                 chunks = text_splitter.split_text(doc['text'])
                 chunk_embeddings = self.embeddings.embed_documents(chunks)
 
                 for chunk, embedding in zip(chunks, chunk_embeddings):
                     points.append(models.PointStruct(
-                        id=total_points,  # Using simple integer IDs
+                        id=total_points,
                         vector=embedding,
                         payload={
                             "text": chunk,
@@ -88,30 +96,34 @@ class SearchSystem:
                     ))
                     total_points += 1
 
-                if idx % 100 == 0:
-                    print(f"Processed {idx}/{len(scraped_data)} documents")
-
                 # Upload in batches
                 if len(points) >= 100:
-                    print(f"Uploading batch of {len(points)} points")
+                    total_batches_uploaded += 1
+                    print(f"\nUploading batch {total_batches_uploaded} ({len(points)} points)")
                     self.qdrant.upsert(
                         collection_name=self.collection_name,
                         points=points
                     )
+                    print(f"Successfully uploaded batch {total_batches_uploaded}")
+                    print(f"Total points processed so far: {total_points}")
                     points = []
 
             # Upload remaining points
             if points:
-                print(f"Uploading final batch of {len(points)} points")
+                total_batches_uploaded += 1
+                print(f"\nUploading final batch {total_batches_uploaded} ({len(points)} points)")
                 self.qdrant.upsert(
                     collection_name=self.collection_name,
                     points=points
                 )
+                print(f"Successfully uploaded final batch")
 
-            print(f"Finished loading {total_points} total points")
+            print(f"\nFinished processing all documents")
+            print(f"Total points uploaded: {total_points}")
+            print(f"Total batches uploaded: {total_batches_uploaded}")
 
         except Exception as e:
-            print(f"Error in _load_initial_data: {str(e)}")
+            print(f"\nError in _load_initial_data: {str(e)}")
             raise
 
     def search(self, query: str, k: int = 3):

@@ -7,6 +7,7 @@ from qdrant_client.http import models
 from qdrant_client.http.models import Distance, VectorParams
 import json
 import os
+import uuid
 
 
 class SearchSystem:
@@ -25,15 +26,12 @@ class SearchSystem:
         self.qdrant = QdrantClient(path="./qdrant_db")
         self.collection_name = "uregina_docs"
 
-        # First, try to recreate collection
         try:
-            print("Checking for existing collection...")
             self.qdrant.delete_collection(collection_name=self.collection_name)
             print("Deleted existing collection")
         except:
             print("No existing collection to delete")
 
-        # Create new collection
         print("Creating new collection...")
         self.qdrant.create_collection(
             collection_name=self.collection_name,
@@ -61,13 +59,13 @@ class SearchSystem:
         points = []
         total_processed = 0
 
-        for idx, doc in enumerate(scraped_data):
+        for doc in scraped_data:
             chunks = text_splitter.split_text(doc['text'])
             chunk_embeddings = self.embeddings.embed_documents(chunks)
 
-            for j, (chunk, embedding) in enumerate(zip(chunks, chunk_embeddings)):
+            for chunk, embedding in zip(chunks, chunk_embeddings):
                 points.append(models.PointStruct(
-                    id=f"doc_{idx}_{j}",
+                    id=str(uuid.uuid4()),  # Generate unique UUID
                     vector=embedding,
                     payload={
                         "text": chunk,

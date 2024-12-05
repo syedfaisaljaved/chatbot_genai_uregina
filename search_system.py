@@ -25,22 +25,24 @@ class SearchSystem:
         self.qdrant = QdrantClient(path="./qdrant_db")
         self.collection_name = "uregina_docs"
 
+        # First, try to recreate collection
         try:
-            collection_info = self.qdrant.get_collection(self.collection_name)
-            count = collection_info.points_count
-            print(f"Found existing collection with {count} documents")
-            if count == 0:
-                self._load_initial_data()
+            print("Checking for existing collection...")
+            self.qdrant.delete_collection(collection_name=self.collection_name)
+            print("Deleted existing collection")
         except:
-            print("Creating new collection...")
-            self.qdrant.create_collection(
-                collection_name=self.collection_name,
-                vectors_config=VectorParams(
-                    size=384,
-                    distance=Distance.COSINE
-                )
+            print("No existing collection to delete")
+
+        # Create new collection
+        print("Creating new collection...")
+        self.qdrant.create_collection(
+            collection_name=self.collection_name,
+            vectors_config=VectorParams(
+                size=384,
+                distance=Distance.COSINE
             )
-            self._load_initial_data()
+        )
+        self._load_initial_data()
 
     def _load_initial_data(self):
         print("\n=== Loading Initial Data ===")

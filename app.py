@@ -26,10 +26,9 @@ class ChatUI:
     def initialize_session(self):
         if 'messages' not in st.session_state:
             st.session_state.messages = []
-        if 'search_system' not in st.session_state:
+        if not hasattr(st.session_state, 'search_system'):
             config = Config()
             st.session_state.search_system = SearchSystem(config)
-            st.session_state.search_system.initialize()
 
     def render(self):
         st.set_page_config(page_title="URegina Assistant", page_icon="🎓", layout="wide")

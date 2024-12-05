@@ -10,9 +10,8 @@ import os
 import logging
 from typing import Dict, Any, List
 import torch
-from multiprocessing import Pool, cpu_count
+from concurrent.futures import ThreadPoolExecutor
 from tqdm import tqdm
-from functools import partial
 
 
 class SearchSystem:
@@ -51,28 +50,28 @@ class SearchSystem:
             )
             self._load_initial_data()
 
-    def process_batch(self, batch_data):
+    def process_doc(self, doc_info):
+        doc, idx = doc_info
         text_splitter = RecursiveCharacterTextSplitter(
             chunk_size=250,
             chunk_overlap=25,
             separators=["\n\n", "\n", ".", "!", "?", ",", " ", ""]
         )
 
-        points = []
-        for i, doc in enumerate(batch_data):
-            chunks = text_splitter.split_text(doc['text'])
-            chunk_embeddings = self.embeddings.embed_documents(chunks)
+        chunks = text_splitter.split_text(doc['text'])
+        chunk_embeddings = self.embeddings.embed_documents(chunks)
 
-            for j, (chunk, embedding) in enumerate(zip(chunks, chunk_embeddings)):
-                points.append(models.PointStruct(
-                    id=f"doc_{i}_{j}",
-                    vector=embedding,
-                    payload={
-                        "text": chunk,
-                        "url": doc['url'],
-                        "title": doc['title']
-                    }
-                ))
+        points = []
+        for j, (chunk, embedding) in enumerate(zip(chunks, chunk_embeddings)):
+            points.append(models.PointStruct(
+                id=f"doc_{idx}_{j}",
+                vector=embedding,
+                payload={
+                    "text": chunk,
+                    "url": doc['url'],
+                    "title": doc['title']
+                }
+            ))
         return points
 
     def _load_initial_data(self):
@@ -85,40 +84,35 @@ class SearchSystem:
                 scraped_data = json.load(f)
             print(f"Successfully loaded JSON with {len(scraped_data)} documents")
 
-            # Calculate optimal batch size and number of processes
-            num_processes = cpu_count() - 1  # Leave one CPU free
-            batch_size = max(1, len(scraped_data) // (num_processes * 4))  # Divide data into smaller batches
+            # Process documents using ThreadPoolExecutor
+            max_workers = min(32, len(scraped_data))  # Limit max threads
+            print(f"Processing documents using {max_workers} threads...")
 
-            # Create batches
-            batches = [
-                scraped_data[i:i + batch_size]
-                for i in range(0, len(scraped_data), batch_size)
-            ]
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                # Create document-index pairs
+                doc_pairs = list(zip(scraped_data, range(len(scraped_data))))
 
-            print(f"Processing documents using {num_processes} processes...")
-
-            # Process batches in parallel
-            with Pool(processes=num_processes) as pool:
-                # Use tqdm for progress bar
-                results = list(tqdm(
-                    pool.imap(self.process_batch, batches),
-                    total=len(batches),
-                    desc="Processing batches"
+                # Process documents and show progress
+                futures = list(tqdm(
+                    executor.map(self.process_doc, doc_pairs),
+                    total=len(scraped_data),
+                    desc="Processing documents"
                 ))
 
-            # Flatten results and upload to Qdrant
-            all_points = [point for batch_points in results for point in batch_points]
+            # Flatten results
+            all_points = [point for points in futures for point in points]
+            print(f"\nProcessed {len(all_points)} total points")
 
             # Upload to Qdrant in batches
-            upload_batch_size = 100
-            for i in range(0, len(all_points), upload_batch_size):
-                batch = all_points[i:i + upload_batch_size]
-                print(
-                    f"Uploading batch {i // upload_batch_size + 1}/{(len(all_points) + upload_batch_size - 1) // upload_batch_size}")
-                self.qdrant.upsert(
-                    collection_name=self.collection_name,
-                    points=batch
-                )
+            batch_size = 100
+            with tqdm(total=len(all_points), desc="Uploading to Qdrant") as pbar:
+                for i in range(0, len(all_points), batch_size):
+                    batch = all_points[i:i + batch_size]
+                    self.qdrant.upsert(
+                        collection_name=self.collection_name,
+                        points=batch
+                    )
+                    pbar.update(len(batch))
 
             final_count = self.qdrant.get_collection(self.collection_name).points_count
             print(f"\nFinished loading data. Collection now has {final_count} documents")

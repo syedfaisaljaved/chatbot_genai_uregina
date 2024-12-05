@@ -1,10 +1,13 @@
-# app.py
 import streamlit as st
 from datetime import datetime
 from pathlib import Path
 from config import Config
 from search_system import SearchSystem
 import json
+import logging
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 
 class ChatUI:
@@ -18,15 +21,24 @@ class ChatUI:
         history_file = self.history_dir / f"chat_{timestamp}.json"
         with open(history_file, 'w') as f:
             json.dump(st.session_state.messages, f)
+        st.success(f"Chat history saved to {history_file}")
+        logger.info(f"Saved chat history to {history_file}")
 
     def load_history(self, file_path):
         with open(file_path, 'r') as f:
             st.session_state.messages = json.load(f)
+        logger.info(f"Loaded chat history from {file_path}")
+        st.success("Chat history loaded successfully")
 
     def initialize_session(self):
+        logger.info("Current session state keys: %s", st.session_state.keys())
+
         if 'messages' not in st.session_state:
+            logger.info("Initializing messages in session state")
             st.session_state.messages = []
-        if not hasattr(st.session_state, 'search_system'):
+
+        if 'search_system' not in st.session_state:
+            logger.info("Initializing search system")
             config = Config()
             st.session_state.search_system = SearchSystem(config)
 
@@ -35,47 +47,84 @@ class ChatUI:
 
         with st.sidebar:
             st.header("Chat History")
+
             if st.button("Save Chat"):
                 self.save_history()
+                logger.info("Chat history saved")
 
-            history_files = list(self.history_dir.glob("*.json"))
-            if history_files:
-                selected_file = st.selectbox(
-                    "Load Previous Chat",
-                    history_files,
-                    format_func=lambda x: x.stem
-                )
-                if st.button("Load"):
-                    self.load_history(selected_file)
-                if st.button("Clear History"):
-                    st.session_state.messages = []
+            if st.button("Clear History"):
+                logger.info("Clearing chat history")
+                st.session_state.messages = []
+                st.experimental_rerun()
+
+            # Debug information in sidebar
+            with st.expander("Debug Info"):
+                st.write("Session State Keys:", list(st.session_state.keys()))
+                st.write("Number of Messages:", len(st.session_state.messages))
+                st.write("Message Types:", [msg["role"] for msg in st.session_state.messages])
 
         st.header("University of Regina AI Assistant")
 
-        for msg in st.session_state.messages:
-            with st.chat_message(msg["role"]):
-                st.write(msg["content"])
-                if "sources" in msg and msg["sources"]:
+        # Display existing chat messages
+        for message in st.session_state.messages:
+            with st.chat_message(message["role"]):
+                st.markdown(message["content"])
+                if "sources" in message and message["sources"]:
                     with st.expander("Sources"):
-                        for src in msg["sources"]:
-                            st.write(f"[{src['title']}]({src['url']})")
+                        for src in message["sources"]:
+                            st.markdown(f"[{src['title']}]({src['url']})")
 
+        # Chat input and immediate response handling
         if prompt := st.chat_input("Ask about URegina..."):
+            logger.info(f"New user input received: {prompt}")
+
+            # Immediately show user message
+            with st.chat_message("user"):
+                st.markdown(prompt)
+
+            # Add user message to history
             st.session_state.messages.append({"role": "user", "content": prompt})
 
+            # Show bot typing and get response
             with st.chat_message("assistant"):
-                with st.spinner("Thinking..."):
-                    response = st.session_state.search_system.search(prompt)
-                    st.write(response['answer'])
+                with st.empty():
+                    st.markdown("Typing...")
 
-                    if response['sources']:
-                        with st.expander("Sources"):
-                            for src in response['sources']:
-                                st.write(f"[{src['title']}]({src['url']})")
+                    try:
+                        # Get response from search system
+                        logger.info("Getting search response")
+                        response = st.session_state.search_system.search(prompt)
+                        logger.info("Search response received")
 
-            st.session_state.messages.append({
-                "role": "assistant",
-                "content": response['answer'],
-                "sources": response['sources']
-            })
+                        # Update message with response
+                        st.markdown(response['answer'])
 
+                        if response['sources']:
+                            with st.expander("Sources"):
+                                for src in response['sources']:
+                                    st.markdown(f"[{src['title']}]({src['url']})")
+
+                        # Add assistant message to history
+                        st.session_state.messages.append({
+                            "role": "assistant",
+                            "content": response['answer'],
+                            "sources": response['sources']
+                        })
+                        logger.info("Assistant response added to chat history")
+
+                    except Exception as e:
+                        logger.error(f"Error processing response: {str(e)}")
+                        st.error(f"Error: {str(e)}")
+
+        # Debug chat history at bottom of page
+        with st.expander("Debug Chat History"):
+            st.json(st.session_state.messages)
+
+
+def main():
+    chat_ui = ChatUI()
+    chat_ui.render()
+
+
+if __name__ == "__main__":
+    main()

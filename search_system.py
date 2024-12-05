@@ -1,5 +1,5 @@
 # search_system.py
-from langchain.embeddings import Nomic
+from langchain.embeddings import HuggingFaceEmbeddings
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 import chromadb
 from chromadb.config import Settings
@@ -15,7 +15,10 @@ class SearchSystem:
     def __init__(self, config: Config):
         self.config = config
         self.qa = OllamaQA(config)
-        self.embeddings = Nomic()
+        self.embeddings = HuggingFaceEmbeddings(
+            model_name="all-MiniLM-L6-v2",
+            model_kwargs={'device': 'cpu'}
+        )
 
         self.chroma_client = chromadb.Client(Settings(
             chroma_db_impl="duckdb+parquet",

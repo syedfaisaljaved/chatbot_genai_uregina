@@ -52,43 +52,60 @@ class SearchSystem:
                 scraped_data = json.load(f)
             print(f"Successfully loaded JSON with {len(scraped_data)} documents")
 
+            # Reduce chunk size and batch size for better memory management
             text_splitter = RecursiveCharacterTextSplitter(
-                chunk_size=self.config.chunk_size,
-                chunk_overlap=self.config.chunk_overlap,
+                chunk_size=250,  # Reduced from 500
+                chunk_overlap=25,  # Reduced from 50
                 separators=["\n\n", "\n", ".", "!", "?", ",", " ", ""]
             )
 
-            print("Processing documents...")
+            print("Processing documents in smaller batches...")
             documents = []
             metadatas = []
             ids = []
+            processed = 0
 
-            for i, doc in enumerate(scraped_data):
-                if i % 100 == 0:
-                    print(f"Processing document {i}/{len(scraped_data)}")
-                chunks = text_splitter.split_text(doc['text'])
-                documents.extend(chunks)
-                metadatas.extend([{
-                    "url": doc['url'],
-                    "title": doc['title']
-                }] * len(chunks))
-                ids.extend([f"doc_{i}_{j}" for j in range(len(chunks))])
+            # Process in smaller document batches
+            doc_batch_size = 500  # Process 500 documents at a time
+            for start_idx in range(0, len(scraped_data), doc_batch_size):
+                end_idx = min(start_idx + doc_batch_size, len(scraped_data))
+                current_batch = scraped_data[start_idx:end_idx]
 
-            print(f"\nTotal chunks created: {len(documents)}")
-            print("Adding documents to ChromaDB...")
+                for i, doc in enumerate(current_batch):
+                    processed += 1
+                    if processed % 100 == 0:
+                        print(
+                            f"Processing document {processed}/{len(scraped_data)} ({(processed / len(scraped_data) * 100):.1f}%)")
 
-            batch_size = 100
-            for i in range(0, len(documents), batch_size):
-                end_idx = min(i + batch_size, len(documents))
-                batch_num = i // batch_size + 1
-                total_batches = (len(documents) + batch_size - 1) // batch_size
-                print(f"Adding batch {batch_num}/{total_batches}")
+                    chunks = text_splitter.split_text(doc['text'])
+                    documents.extend(chunks)
+                    metadatas.extend([{
+                        "url": doc['url'],
+                        "title": doc['title']
+                    }] * len(chunks))
+                    ids.extend([f"doc_{start_idx + i}_{j}" for j in range(len(chunks))])
 
-                self.collection.add(
-                    documents=documents[i:end_idx],
-                    metadatas=metadatas[i:end_idx],
-                    ids=ids[i:end_idx]
-                )
+                # Add to ChromaDB when batch is full
+                if len(documents) >= 1000 or end_idx == len(scraped_data):
+                    print(f"\nAdding {len(documents)} chunks to ChromaDB...")
+
+                    # Add in smaller sub-batches
+                    sub_batch_size = 100
+                    for i in range(0, len(documents), sub_batch_size):
+                        end = min(i + sub_batch_size, len(documents))
+                        print(
+                            f"Adding sub-batch {i // sub_batch_size + 1}/{(len(documents) + sub_batch_size - 1) // sub_batch_size}")
+
+                        self.collection.add(
+                            documents=documents[i:end],
+                            metadatas=metadatas[i:end],
+                            ids=ids[i:end]
+                        )
+
+                    # Clear processed chunks
+                    documents = []
+                    metadatas = []
+                    ids = []
 
             final_count = self.collection.count()
             print(f"\nFinished loading data. Collection now has {final_count} documents")

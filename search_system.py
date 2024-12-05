@@ -7,9 +7,6 @@ from qdrant_client.http import models
 from qdrant_client.http.models import Distance, VectorParams
 import json
 import os
-import logging
-from typing import Dict, Any, List
-from tqdm import tqdm
 
 
 class SearchSystem:
@@ -46,60 +43,62 @@ class SearchSystem:
             self._load_initial_data()
 
     def _load_initial_data(self):
-        try:
-            print("\n=== Loading Initial Data ===")
-            data_path = os.path.join(self.config.cache_dir, self.config.data_file)
+        print("\n=== Loading Initial Data ===")
+        data_path = os.path.join(self.config.cache_dir, self.config.data_file)
 
-            with open(data_path) as f:
-                scraped_data = json.load(f)
-            print(f"Loaded {len(scraped_data)} documents")
+        with open(data_path) as f:
+            scraped_data = json.load(f)
+        print(f"Loaded {len(scraped_data)} documents")
 
-            text_splitter = RecursiveCharacterTextSplitter(
-                chunk_size=250,
-                chunk_overlap=25,
-                separators=["\n\n", "\n", ".", "!", "?", ",", " ", ""]
-            )
+        text_splitter = RecursiveCharacterTextSplitter(
+            chunk_size=250,
+            chunk_overlap=25,
+            separators=["\n\n", "\n", ".", "!", "?", ",", " ", ""]
+        )
 
-            # Process documents sequentially with progress bar
-            points = []
-            for idx, doc in enumerate(tqdm(scraped_data, desc="Processing documents")):
-                chunks = text_splitter.split_text(doc['text'])
-                chunk_embeddings = self.embeddings.embed_documents(chunks)
+        points = []
+        total_processed = 0
 
-                for j, (chunk, embedding) in enumerate(zip(chunks, chunk_embeddings)):
-                    points.append(models.PointStruct(
-                        id=f"doc_{idx}_{j}",
-                        vector=embedding,
-                        payload={
-                            "text": chunk,
-                            "url": doc['url'],
-                            "title": doc['title']
-                        }
-                    ))
+        for idx, doc in enumerate(scraped_data):
+            chunks = text_splitter.split_text(doc['text'])
+            chunk_embeddings = self.embeddings.embed_documents(chunks)
 
-                # Upload in batches to save memory
-                if len(points) >= 100:
-                    self.qdrant.upsert(
-                        collection_name=self.collection_name,
-                        points=points
-                    )
-                    points = []
+            for j, (chunk, embedding) in enumerate(zip(chunks, chunk_embeddings)):
+                points.append(models.PointStruct(
+                    id=f"doc_{idx}_{j}",
+                    vector=embedding,
+                    payload={
+                        "text": chunk,
+                        "url": doc['url'],
+                        "title": doc['title']
+                    }
+                ))
 
-            # Upload remaining points
-            if points:
+            total_processed += 1
+            if total_processed % 100 == 0:
+                print(f"Processed {total_processed}/{len(scraped_data)} documents")
+
+            # Upload in batches
+            if len(points) >= 100:
+                print(f"Uploading batch of {len(points)} points")
                 self.qdrant.upsert(
                     collection_name=self.collection_name,
                     points=points
                 )
+                points = []
 
-            count = self.qdrant.get_collection(self.collection_name).points_count
-            print(f"Finished loading. Collection has {count} documents")
+        # Upload remaining points
+        if points:
+            print(f"Uploading final batch of {len(points)} points")
+            self.qdrant.upsert(
+                collection_name=self.collection_name,
+                points=points
+            )
 
-        except Exception as e:
-            print(f"Error in _load_initial_data: {str(e)}")
-            raise
+        count = self.qdrant.get_collection(self.collection_name).points_count
+        print(f"Finished loading. Collection has {count} documents")
 
-    def search(self, query: str, k: int = 3) -> Dict[str, Any]:
+    def search(self, query: str, k: int = 3):
         try:
             query_embedding = self.embeddings.embed_query(query)
             results = self.qdrant.search(
